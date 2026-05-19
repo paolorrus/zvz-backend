@@ -10,7 +10,6 @@ CORS(app)
 
 intents = discord.Intents.all()
 client = discord.Client(intents=intents)
-
 bot_loop = None
 
 @app.route('/voice/<channel_id>')
@@ -20,9 +19,12 @@ def get_voice_members(channel_id):
     
     async def fetch():
         try:
-            channel = await client.fetch_channel(int(channel_id))
-            members = [m.display_name for m in channel.members]
-            return members
+            for guild in client.guilds:
+                for channel in guild.voice_channels:
+                    if channel.id == int(channel_id):
+                        members = [m.display_name for m in channel.members]
+                        return members
+            return {"error": "Canal no encontrado"}
         except Exception as e:
             return {"error": str(e)}
     
