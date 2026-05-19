@@ -8,10 +8,7 @@ import os
 app = Flask(__name__)
 CORS(app)
 
-intents = discord.Intents.default()
-intents.members = True
-intents.voice_states = True
-intents.guilds = True
+intents = discord.Intents.all()
 client = discord.Client(intents=intents)
 
 bot_loop = None
