@@ -54,6 +54,10 @@ def listar_canales():
 @client.event
 async def on_ready():
     print(f'Bot conectado como {client.user}', flush=True)
+    for guild in client.guilds:
+        print(f'Servidor: {guild.name} ({guild.id}) — {guild.member_count} miembros', flush=True)
+        await guild.chunk()
+    print('Sync completado', flush=True)
 
 def run_discord():
     global bot_loop
