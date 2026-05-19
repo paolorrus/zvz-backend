@@ -1,6 +1,7 @@
 import discord
 from flask import Flask, jsonify
 from flask_cors import CORS
+import asyncio
 import threading
 import os
 
@@ -20,12 +21,18 @@ def get_voice_members(channel_id):
     members = [m.display_name for m in channel.members]
     return jsonify({"members": members})
 
-def run_flask():
-    app.run(host='0.0.0.0', port=5000)
+@app.route('/health')
+def health():
+    return jsonify({"status": "ok"})
 
 @client.event
 async def on_ready():
     print(f'Bot conectado como {client.user}')
-    threading.Thread(target=run_flask, daemon=True).start()
 
-client.run(os.environ['DISCORD_TOKEN'])
+def run_discord():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(client.start(os.environ['DISCORD_TOKEN']))
+
+# Arranca el bot en hilo separado al importar
+threading.Thread(target=run_discord, daemon=True).start()
