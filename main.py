@@ -28,4 +28,4 @@ async def on_ready():
     print(f'Bot conectado como {client.user}')
     threading.Thread(target=run_flask, daemon=True).start()
 
-client.run(os.environ['MTUwNjM3ODMyODA3NDg3OTA4Nw.GLyMge.z6U2_eN0r7umMOit4QUGij1S8aLx2aZjkH4UKY'])
+client.run(os.environ['DISCORD_TOKEN'])
