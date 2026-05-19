@@ -4,7 +4,6 @@ from flask_cors import CORS
 import asyncio
 import threading
 import os
-import sys
 
 app = Flask(__name__)
 CORS(app)
@@ -12,34 +11,62 @@ CORS(app)
 intents = discord.Intents.default()
 intents.members = True
 intents.voice_states = True
+intents.guilds = True
 client = discord.Client(intents=intents)
+
+bot_loop = None
 
 @app.route('/voice/<channel_id>')
 def get_voice_members(channel_id):
-    channel = client.get_channel(int(channel_id))
-    if channel is None:
-        return jsonify({"error": "Canal no encontrado"}), 404
-    members = [m.display_name for m in channel.members]
-    return jsonify({"members": members})
+    if bot_loop is None:
+        return jsonify({"error": "Bot no listo todavía"}), 503
+    
+    async def fetch():
+        try:
+            channel = await client.fetch_channel(int(channel_id))
+            members = [m.display_name for m in channel.members]
+            return members
+        except Exception as e:
+            return {"error": str(e)}
+    
+    future = asyncio.run_coroutine_threadsafe(fetch(), bot_loop)
+    result = future.result(timeout=10)
+    
+    if isinstance(result, dict) and "error" in result:
+        return jsonify(result), 404
+    return jsonify({"members": result})
 
 @app.route('/health')
 def health():
     return jsonify({"status": "ok", "bot_ready": not client.is_closed()})
+
+@app.route('/canales')
+def listar_canales():
+    canales = []
+    for guild in client.guilds:
+        for channel in guild.channels:
+            canales.append({
+                "id": str(channel.id),
+                "nombre": channel.name,
+                "tipo": str(channel.type)
+            })
+    return jsonify(canales)
 
 @client.event
 async def on_ready():
     print(f'Bot conectado como {client.user}', flush=True)
 
 def run_discord():
+    global bot_loop
     try:
         token = os.environ.get('DISCORD_TOKEN')
         if not token:
-            print('ERROR: DISCORD_TOKEN no está definido', flush=True)
+            print('ERROR: DISCORD_TOKEN no definido', flush=True)
             return
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(client.start(token))
+        bot_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(bot_loop)
+        bot_loop.run_until_complete(client.start(token))
     except Exception as e:
-        print(f'ERROR en bot Discord: {e}', flush=True)
+        print(f'ERROR bot: {e}', flush=True)
 
 threading.Thread(target=run_discord, daemon=True).start()
