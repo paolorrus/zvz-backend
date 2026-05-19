@@ -11,29 +11,15 @@ CORS(app)
 intents = discord.Intents.all()
 client = discord.Client(intents=intents)
 bot_loop = None
+cache_canales = []
+cache_voice = {}  # channel_id -> [members]
 
 @app.route('/voice/<channel_id>')
 def get_voice_members(channel_id):
-    if bot_loop is None:
-        return jsonify({"error": "Bot no listo todavía"}), 503
-    
-    async def fetch():
-        try:
-            for guild in client.guilds:
-                for channel in guild.voice_channels:
-                    if channel.id == int(channel_id):
-                        members = [m.display_name for m in channel.members]
-                        return members
-            return {"error": "Canal no encontrado"}
-        except Exception as e:
-            return {"error": str(e)}
-    
-    future = asyncio.run_coroutine_threadsafe(fetch(), bot_loop)
-    result = future.result(timeout=10)
-    
-    if isinstance(result, dict) and "error" in result:
-        return jsonify(result), 404
-    return jsonify({"members": result})
+    members = cache_voice.get(int(channel_id), None)
+    if members is None:
+        return jsonify({"error": "Canal no encontrado"}), 404
+    return jsonify({"members": members})
 
 @app.route('/health')
 def health():
@@ -41,7 +27,12 @@ def health():
 
 @app.route('/canales')
 def listar_canales():
+    return jsonify(cache_canales)
+
+def actualizar_cache():
+    global cache_canales, cache_voice
     canales = []
+    voice = {}
     for guild in client.guilds:
         for channel in guild.channels:
             canales.append({
@@ -49,15 +40,24 @@ def listar_canales():
                 "nombre": channel.name,
                 "tipo": str(channel.type)
             })
-    return jsonify(canales)
+        for channel in guild.voice_channels:
+            voice[channel.id] = [m.display_name for m in channel.members]
+    cache_canales = canales
+    cache_voice = voice
+    print(f'Cache actualizada: {len(canales)} canales, {len(voice)} canales de voz', flush=True)
 
 @client.event
 async def on_ready():
     print(f'Bot conectado como {client.user}', flush=True)
     for guild in client.guilds:
-        print(f'Servidor: {guild.name} ({guild.id}) — {guild.member_count} miembros', flush=True)
+        print(f'Servidor: {guild.name} ({guild.id})', flush=True)
         await guild.chunk()
+    actualizar_cache()
     print('Sync completado', flush=True)
+
+@client.event
+async def on_voice_state_update(member, before, after):
+    actualizar_cache()
 
 def run_discord():
     global bot_loop
