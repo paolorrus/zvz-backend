@@ -4,6 +4,7 @@ from flask_cors import CORS
 import asyncio
 import threading
 import os
+import sys
 
 app = Flask(__name__)
 CORS(app)
@@ -23,16 +24,22 @@ def get_voice_members(channel_id):
 
 @app.route('/health')
 def health():
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok", "bot_ready": not client.is_closed()})
 
 @client.event
 async def on_ready():
-    print(f'Bot conectado como {client.user}')
+    print(f'Bot conectado como {client.user}', flush=True)
 
 def run_discord():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(client.start(os.environ['DISCORD_TOKEN']))
+    try:
+        token = os.environ.get('DISCORD_TOKEN')
+        if not token:
+            print('ERROR: DISCORD_TOKEN no está definido', flush=True)
+            return
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(client.start(token))
+    except Exception as e:
+        print(f'ERROR en bot Discord: {e}', flush=True)
 
-# Arranca el bot en hilo separado al importar
 threading.Thread(target=run_discord, daemon=True).start()
