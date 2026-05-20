@@ -19,6 +19,11 @@ def get_voice_members(channel_id):
     members = cache_voice.get(int(channel_id), None)
     if members is None:
         return jsonify({"error": "Canal no encontrado"}), 404
+
+    # If cache seems incomplete, trigger a background refresh
+    if bot_loop and not client.is_closed():
+        asyncio.run_coroutine_threadsafe(refresh_voice_cache(), bot_loop)
+
     return jsonify({"members": members})
 
 @app.route('/health')
@@ -41,23 +46,47 @@ def actualizar_cache():
                 "tipo": str(channel.type)
             })
         for channel in guild.voice_channels:
-            voice[channel.id] = [m.display_name for m in channel.members]
+            # Get ALL members — use voice_states for accuracy
+            members_in_channel = [
+                member.display_name
+                for member in guild.members
+                if member.voice and member.voice.channel and member.voice.channel.id == channel.id
+            ]
+            voice[channel.id] = members_in_channel
+            if members_in_channel:
+                print(f'Canal voz "{channel.name}": {members_in_channel}', flush=True)
+
     cache_canales = canales
     cache_voice = voice
-    print(f'Cache actualizada: {len(canales)} canales, {len(voice)} canales de voz', flush=True)
+    print(f'Cache actualizada: {len(canales)} canales, {sum(len(v) for v in voice.values())} usuarios en voz', flush=True)
+
+async def refresh_voice_cache():
+    """Force re-chunk all guilds and update cache — called when voice endpoint hit."""
+    for guild in client.guilds:
+        try:
+            await guild.chunk(cache=True)
+        except Exception as e:
+            print(f'chunk error {guild.name}: {e}', flush=True)
+    actualizar_cache()
 
 @client.event
 async def on_ready():
     print(f'Bot conectado como {client.user}', flush=True)
     for guild in client.guilds:
         print(f'Servidor: {guild.name} ({guild.id})', flush=True)
-        await guild.chunk()
+        try:
+            await guild.chunk(cache=True)
+            print(f'Chunk OK: {guild.name} — {guild.member_count} miembros', flush=True)
+        except Exception as e:
+            print(f'Chunk error: {e}', flush=True)
     actualizar_cache()
     print('Sync completado', flush=True)
 
 @client.event
 async def on_voice_state_update(member, before, after):
+    # Update cache immediately when someone joins/leaves voice
     actualizar_cache()
+    print(f'Voice update: {member.display_name} — antes: {before.channel}, después: {after.channel}', flush=True)
 
 def run_discord():
     global bot_loop
