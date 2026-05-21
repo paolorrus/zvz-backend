@@ -16,13 +16,17 @@ cache_voice = {}  # channel_id -> [members]
 
 @app.route('/voice/<channel_id>')
 def get_voice_members(channel_id):
+    # Force a fresh re-chunk and WAIT for it before responding
+    if bot_loop and not client.is_closed():
+        future = asyncio.run_coroutine_threadsafe(refresh_voice_cache(), bot_loop)
+        try:
+            future.result(timeout=8)  # wait up to 8s for fresh data
+        except Exception as e:
+            print(f'Refresh timeout/error: {e}', flush=True)
+
     members = cache_voice.get(int(channel_id), None)
     if members is None:
         return jsonify({"error": "Canal no encontrado"}), 404
-
-    # If cache seems incomplete, trigger a background refresh
-    if bot_loop and not client.is_closed():
-        asyncio.run_coroutine_threadsafe(refresh_voice_cache(), bot_loop)
 
     return jsonify({"members": members})
 
@@ -46,7 +50,6 @@ def actualizar_cache():
                 "tipo": str(channel.type)
             })
         for channel in guild.voice_channels:
-            # Get ALL members — use voice_states for accuracy
             members_in_channel = [
                 member.display_name
                 for member in guild.members
@@ -54,14 +57,13 @@ def actualizar_cache():
             ]
             voice[channel.id] = members_in_channel
             if members_in_channel:
-                print(f'Canal voz "{channel.name}": {members_in_channel}', flush=True)
+                print(f'Canal voz "{channel.name}": {len(members_in_channel)} — {members_in_channel}', flush=True)
 
     cache_canales = canales
     cache_voice = voice
-    print(f'Cache actualizada: {len(canales)} canales, {sum(len(v) for v in voice.values())} usuarios en voz', flush=True)
+    print(f'Cache actualizada: {sum(len(v) for v in voice.values())} usuarios en voz', flush=True)
 
 async def refresh_voice_cache():
-    """Force re-chunk all guilds and update cache — called when voice endpoint hit."""
     for guild in client.guilds:
         try:
             await guild.chunk(cache=True)
@@ -84,9 +86,7 @@ async def on_ready():
 
 @client.event
 async def on_voice_state_update(member, before, after):
-    # Update cache immediately when someone joins/leaves voice
     actualizar_cache()
-    print(f'Voice update: {member.display_name} — antes: {before.channel}, después: {after.channel}', flush=True)
 
 def run_discord():
     global bot_loop
