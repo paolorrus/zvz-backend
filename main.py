@@ -5,7 +5,7 @@ import asyncio
 import threading
 import os
 import time
-import copy
+import json
 
 app = Flask(__name__)
 CORS(app)
@@ -17,59 +17,69 @@ bot_ready = False
 last_voice_event = None
 
 DISCORD_TOKEN = os.environ.get('DISCORD_TOKEN', '')
+CACHE_FILE = '/tmp/voice_cache.json'
 
-_cache_lock = threading.Lock()
-_voice_cache = {}  # channel_id (int) -> [display_name, ...]
+
+def save_cache(data):
+    """Escribe cache a disco — compartido entre todos los threads."""
+    try:
+        with open(CACHE_FILE, 'w') as f:
+            json.dump(data, f)
+    except Exception as e:
+        print(f'[save_cache error] {e}', flush=True)
+
+
+def load_cache():
+    """Lee cache de disco."""
+    try:
+        with open(CACHE_FILE, 'r') as f:
+            return json.load(f)
+    except:
+        return {}
 
 
 def full_rebuild():
     """Reconstruye cache completa desde guild.members."""
-    global _voice_cache
     new_cache = {}
     for guild in client.guilds:
         for member in guild.members:
             if member.voice and member.voice.channel:
-                cid = member.voice.channel.id
+                cid = str(member.voice.channel.id)
                 if cid not in new_cache:
                     new_cache[cid] = []
                 new_cache[cid].append(member.display_name)
-    with _cache_lock:
-        _voice_cache = new_cache
+    save_cache(new_cache)
     total = sum(len(v) for v in new_cache.values())
     print(f'[full_rebuild] {total} usuarios en voz', flush=True)
 
 
 def apply_voice_update(member_name, before_channel_id, after_channel_id):
-    """Aplica un cambio puntual a la cache sin depender de guild.members."""
-    with _cache_lock:
-        # Quitar del canal anterior
-        if before_channel_id and before_channel_id in _voice_cache:
-            _voice_cache[before_channel_id] = [
-                n for n in _voice_cache[before_channel_id] if n != member_name
-            ]
-            if not _voice_cache[before_channel_id]:
-                del _voice_cache[before_channel_id]
+    """Aplica un cambio puntual a la cache."""
+    cache = load_cache()
 
-        # Añadir al canal nuevo
-        if after_channel_id:
-            if after_channel_id not in _voice_cache:
-                _voice_cache[after_channel_id] = []
-            if member_name not in _voice_cache[after_channel_id]:
-                _voice_cache[after_channel_id].append(member_name)
+    b_key = str(before_channel_id) if before_channel_id else None
+    a_key = str(after_channel_id) if after_channel_id else None
 
-        # Log resultado
-        total = sum(len(v) for v in _voice_cache.values())
-        print(f'[apply] Cache: {total} usuarios en voz', flush=True)
+    # Quitar del canal anterior
+    if b_key and b_key in cache:
+        cache[b_key] = [n for n in cache[b_key] if n != member_name]
+        if not cache[b_key]:
+            del cache[b_key]
 
+    # Añadir al canal nuevo
+    if a_key:
+        if a_key not in cache:
+            cache[a_key] = []
+        if member_name not in cache[a_key]:
+            cache[a_key].append(member_name)
 
-def get_cache():
-    with _cache_lock:
-        return copy.deepcopy(_voice_cache)
+    save_cache(cache)
+    total = sum(len(v) for v in cache.values())
+    print(f'[apply] {member_name} → Cache: {total} usuarios', flush=True)
 
 
 @app.route('/voice/<channel_id>')
 def get_voice_members(channel_id):
-    cid = int(channel_id)
     if not bot_ready:
         for _ in range(20):
             if bot_ready: break
@@ -77,20 +87,20 @@ def get_voice_members(channel_id):
         if not bot_ready:
             return jsonify({"error": "Bot aún conectando"}), 503
 
-    cache = get_cache()
-    members = cache.get(cid, [])
-    print(f'[/voice/{cid}] → {len(members)} miembros', flush=True)
+    cache = load_cache()
+    members = cache.get(channel_id, [])
+    print(f'[/voice/{channel_id}] → {len(members)} miembros', flush=True)
     return jsonify({"members": members})
 
 
 @app.route('/debug')
 def debug():
-    cache = get_cache()
+    cache = load_cache()
     return jsonify({
         "bot_ready": bot_ready,
         "is_closed": client.is_closed(),
         "last_voice_event": last_voice_event,
-        "voice_cache": {str(k): v for k, v in cache.items()},
+        "voice_cache": cache,
     })
 
 
@@ -132,8 +142,6 @@ async def on_voice_state_update(member, before, after):
     a_id = after.channel.id if after.channel else None
     last_voice_event = f'{member.display_name}: {b_name} → {a_name} @ {time.strftime("%H:%M:%S")}'
     print(f'[Voice] {last_voice_event}', flush=True)
-
-    # Aplicar cambio directamente — no depender de guild.members
     apply_voice_update(member.display_name, b_id, a_id)
 
 
