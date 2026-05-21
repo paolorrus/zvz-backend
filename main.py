@@ -13,7 +13,7 @@ intents = discord.Intents.all()
 client = discord.Client(intents=intents)
 bot_loop = None
 bot_ready = False
-last_voice_event = None  # debug
+last_voice_event = None
 
 DISCORD_TOKEN = os.environ.get('DISCORD_TOKEN', '')
 
@@ -36,10 +36,9 @@ def rebuild_cache():
 def get_voice_members(channel_id):
     cid = int(channel_id)
     if not bot_ready:
-        import time as t
         for _ in range(20):
             if bot_ready: break
-            t.sleep(1)
+            time.sleep(1)
         if not bot_ready:
             return jsonify({"error": "Bot aún conectando"}), 503
 
@@ -50,7 +49,6 @@ def get_voice_members(channel_id):
 
 @app.route('/debug')
 def debug():
-    """Muestra el estado real del bot en este momento."""
     guild_info = []
     for guild in client.guilds:
         vc_info = []
@@ -105,7 +103,7 @@ async def on_ready():
             print(f'Chunk error: {e}', flush=True)
     rebuild_cache()
     bot_ready = True
-    print(f'=== BOT READY ===', flush=True)
+    print('=== BOT READY ===', flush=True)
 
 
 @client.event
@@ -132,4 +130,5 @@ def run_discord():
         print(f'ERROR bot: {e}', flush=True)
 
 
-threading.Thread(target=run_discord, daemon=True).start()
+# daemon=False para que gunicorn no mate el thread del bot
+threading.Thread(target=run_discord, daemon=False).start()
