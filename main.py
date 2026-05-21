@@ -13,58 +13,52 @@ client = discord.Client(intents=intents)
 bot_loop = None
 bot_ready = False
 cache_canales = []
-cache_voice = {}   # channel_id (int) -> [display_name, ...]
+cache_voice = {}
 
 
-# ── CORE: build cache using channel.members directly ──────────────────────────
-# Discord.py keeps VoiceChannel.members up-to-date via gateway events,
-# so we don't need guild.chunk() here — it's always fresh.
 def actualizar_cache():
     global cache_canales, cache_voice
     canales = []
     voice = {}
-
     for guild in client.guilds:
         for channel in guild.channels:
-            canales.append({
-                "id": str(channel.id),
-                "nombre": channel.name,
-                "tipo": str(channel.type)
-            })
-
-        # Voice channels — use channel.members (always live)
+            canales.append({"id": str(channel.id), "nombre": channel.name, "tipo": str(channel.type)})
         for channel in guild.voice_channels:
             members_in = [m.display_name for m in channel.members]
             voice[channel.id] = members_in
             if members_in:
                 print(f'  Voz "{channel.name}" ({channel.id}): {len(members_in)} — {members_in}', flush=True)
-
-        # Stage channels
         for channel in guild.stage_channels:
             members_in = [m.display_name for m in channel.members]
             if members_in:
                 voice[channel.id] = members_in
-
     cache_canales = canales
     cache_voice = voice
     total = sum(len(v) for v in voice.values())
-    print(f'Cache OK: {len(canales)} canales, {len(voice)} voz, {total} usuarios en voz', flush=True)
+    print(f'Cache OK: {len(canales)} canales, {len(voice)} voz, {total} usuarios', flush=True)
 
 
-# ── EVENTS ────────────────────────────────────────────────────────────────────
+async def rechunk_and_refresh():
+    """Re-chunk all guilds to get fresh member data, then rebuild cache."""
+    for guild in client.guilds:
+        try:
+            await guild.chunk(cache=True)
+        except Exception as e:
+            print(f'Chunk error {guild.name}: {e}', flush=True)
+    actualizar_cache()
+
+
 @client.event
 async def on_ready():
     global bot_ready
     print(f'Bot conectado como {client.user}', flush=True)
     for guild in client.guilds:
         print(f'Servidor: {guild.name} ({guild.id})', flush=True)
-        # chunk once at start so member cache is populated
         try:
             await guild.chunk(cache=True)
             print(f'Chunk OK: {guild.name} — {guild.member_count} miembros', flush=True)
         except Exception as e:
             print(f'Chunk error: {e}', flush=True)
-
     actualizar_cache()
     bot_ready = True
     print('=== BOT READY ===', flush=True)
@@ -72,28 +66,32 @@ async def on_ready():
 
 @client.event
 async def on_voice_state_update(member, before, after):
-    # Fires whenever someone joins/leaves/moves — just rebuild cache
     actualizar_cache()
-    print(f'[VoiceUpdate] {member.display_name}: {before.channel} → {after.channel}', flush=True)
+    print(f'[VoiceUpdate] {member.display_name}: {getattr(before.channel,"name","None")} → {getattr(after.channel,"name","None")}', flush=True)
 
 
-# ── FLASK ROUTES ──────────────────────────────────────────────────────────────
 @app.route('/voice/<channel_id>')
 def get_voice_members(channel_id):
     cid = int(channel_id)
 
-    # Wait for bot on cold start
     if not bot_ready:
         import time
-        for _ in range(15):
+        for _ in range(20):
             if bot_ready:
                 break
             time.sleep(1)
         if not bot_ready:
             return jsonify({"error": "Bot aún conectando, intenta en 10s"}), 503
 
-    # Re-read live from Discord objects (no async needed — channel.members is live)
-    # This guarantees we always return the freshest data, not a stale cache.
+    # ── Siempre re-chunk antes de responder para datos frescos ──
+    if bot_loop and not client.is_closed():
+        try:
+            future = asyncio.run_coroutine_threadsafe(rechunk_and_refresh(), bot_loop)
+            future.result(timeout=15)
+        except Exception as e:
+            print(f'Re-chunk error: {e}', flush=True)
+
+    # Leer directo del objeto canal (siempre fresco tras el chunk)
     live_members = None
     for guild in client.guilds:
         for channel in list(guild.voice_channels) + list(guild.stage_channels):
@@ -104,18 +102,10 @@ def get_voice_members(channel_id):
             break
 
     if live_members is None:
-        # Also update cache so next call to /canales is fresh
-        actualizar_cache()
-        print(f'Canal {cid} no encontrado. Canales en cache: {list(cache_voice.keys())}', flush=True)
-        return jsonify({
-            "error": "Canal no encontrado",
-            "canales_disponibles": [str(k) for k in cache_voice.keys()]
-        }), 404
+        print(f'Canal {cid} no encontrado. Disponibles: {list(cache_voice.keys())}', flush=True)
+        return jsonify({"error": "Canal no encontrado", "canales_disponibles": [str(k) for k in cache_voice.keys()]}), 404
 
-    # Also refresh global cache so /canales stays in sync
-    cache_voice[cid] = live_members
-
-    print(f'[/voice/{cid}] {len(live_members)} miembros: {live_members}', flush=True)
+    print(f'[/voice/{cid}] → {len(live_members)} miembros: {live_members}', flush=True)
     return jsonify({"members": live_members})
 
 
@@ -135,7 +125,6 @@ def listar_canales():
     return jsonify(cache_canales)
 
 
-# ── BOT THREAD ────────────────────────────────────────────────────────────────
 def run_discord():
     global bot_loop
     try:
