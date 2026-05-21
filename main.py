@@ -4,7 +4,6 @@ from flask_cors import CORS
 import asyncio
 import threading
 import os
-import time
 
 app = Flask(__name__)
 CORS(app)
@@ -14,41 +13,111 @@ client = discord.Client(intents=intents)
 bot_loop = None
 bot_ready = False
 cache_canales = []
-cache_voice = {}
-last_refresh = 0
+cache_voice = {}   # channel_id (int) -> [display_name, ...]
 
+
+# ── CORE: build cache using channel.members directly ──────────────────────────
+# Discord.py keeps VoiceChannel.members up-to-date via gateway events,
+# so we don't need guild.chunk() here — it's always fresh.
+def actualizar_cache():
+    global cache_canales, cache_voice
+    canales = []
+    voice = {}
+
+    for guild in client.guilds:
+        for channel in guild.channels:
+            canales.append({
+                "id": str(channel.id),
+                "nombre": channel.name,
+                "tipo": str(channel.type)
+            })
+
+        # Voice channels — use channel.members (always live)
+        for channel in guild.voice_channels:
+            members_in = [m.display_name for m in channel.members]
+            voice[channel.id] = members_in
+            if members_in:
+                print(f'  Voz "{channel.name}" ({channel.id}): {len(members_in)} — {members_in}', flush=True)
+
+        # Stage channels
+        for channel in guild.stage_channels:
+            members_in = [m.display_name for m in channel.members]
+            if members_in:
+                voice[channel.id] = members_in
+
+    cache_canales = canales
+    cache_voice = voice
+    total = sum(len(v) for v in voice.values())
+    print(f'Cache OK: {len(canales)} canales, {len(voice)} voz, {total} usuarios en voz', flush=True)
+
+
+# ── EVENTS ────────────────────────────────────────────────────────────────────
+@client.event
+async def on_ready():
+    global bot_ready
+    print(f'Bot conectado como {client.user}', flush=True)
+    for guild in client.guilds:
+        print(f'Servidor: {guild.name} ({guild.id})', flush=True)
+        # chunk once at start so member cache is populated
+        try:
+            await guild.chunk(cache=True)
+            print(f'Chunk OK: {guild.name} — {guild.member_count} miembros', flush=True)
+        except Exception as e:
+            print(f'Chunk error: {e}', flush=True)
+
+    actualizar_cache()
+    bot_ready = True
+    print('=== BOT READY ===', flush=True)
+
+
+@client.event
+async def on_voice_state_update(member, before, after):
+    # Fires whenever someone joins/leaves/moves — just rebuild cache
+    actualizar_cache()
+    print(f'[VoiceUpdate] {member.display_name}: {before.channel} → {after.channel}', flush=True)
+
+
+# ── FLASK ROUTES ──────────────────────────────────────────────────────────────
 @app.route('/voice/<channel_id>')
 def get_voice_members(channel_id):
     cid = int(channel_id)
-    
-    # If bot isn't ready yet (cold start), wait a bit
+
+    # Wait for bot on cold start
     if not bot_ready:
-        for _ in range(15):  # wait up to 15s for bot to connect
+        import time
+        for _ in range(15):
             if bot_ready:
                 break
             time.sleep(1)
         if not bot_ready:
             return jsonify({"error": "Bot aún conectando, intenta en 10s"}), 503
 
-    # Force fresh re-chunk and WAIT
-    if bot_loop and not client.is_closed():
-        try:
-            future = asyncio.run_coroutine_threadsafe(refresh_voice_cache(), bot_loop)
-            future.result(timeout=15)  # Wait up to 15s for refresh
-        except Exception as e:
-            print(f'Refresh error: {e}', flush=True)
+    # Re-read live from Discord objects (no async needed — channel.members is live)
+    # This guarantees we always return the freshest data, not a stale cache.
+    live_members = None
+    for guild in client.guilds:
+        for channel in list(guild.voice_channels) + list(guild.stage_channels):
+            if channel.id == cid:
+                live_members = [m.display_name for m in channel.members]
+                break
+        if live_members is not None:
+            break
 
-    members = cache_voice.get(cid, None)
-    if members is None:
-        # Debug: print what channels we DO have
+    if live_members is None:
+        # Also update cache so next call to /canales is fresh
+        actualizar_cache()
         print(f'Canal {cid} no encontrado. Canales en cache: {list(cache_voice.keys())}', flush=True)
         return jsonify({
             "error": "Canal no encontrado",
-            "canales_disponibles": list(str(k) for k in cache_voice.keys()),
-            "total_canales": len(cache_voice)
+            "canales_disponibles": [str(k) for k in cache_voice.keys()]
         }), 404
 
-    return jsonify({"members": members, "count": len(members)})
+    # Also refresh global cache so /canales stays in sync
+    cache_voice[cid] = live_members
+
+    print(f'[/voice/{cid}] {len(live_members)} miembros: {live_members}', flush=True)
+    return jsonify({"members": live_members})
+
 
 @app.route('/health')
 def health():
@@ -56,114 +125,17 @@ def health():
         "status": "ok",
         "bot_ready": bot_ready,
         "guilds": len(client.guilds) if bot_ready else 0,
-        "voice_channels_cached": len(cache_voice),
-        "cache": {str(k): len(v) for k, v in cache_voice.items()}
+        "voice_channels_cached": len(cache_voice)
     })
+
 
 @app.route('/canales')
 def listar_canales():
-    # Force refresh if bot is ready
-    if bot_ready and bot_loop and not client.is_closed():
-        try:
-            future = asyncio.run_coroutine_threadsafe(refresh_voice_cache(), bot_loop)
-            future.result(timeout=10)
-        except:
-            pass
+    actualizar_cache()
     return jsonify(cache_canales)
 
-def actualizar_cache():
-    """Actualiza el caché de canales y usuarios en voz"""
-    global cache_canales, cache_voice
-    canales = []
-    voice = {}
-    
-    print('=== INICIANDO ACTUALIZACIÓN DE CACHÉ ===', flush=True)
-    
-    for guild in client.guilds:
-        print(f'Guild: {guild.name} ({guild.id}) — {guild.member_count} miembros', flush=True)
-        
-        # Listar TODOS los canales
-        for channel in guild.channels:
-            canales.append({
-                "id": str(channel.id),
-                "nombre": channel.name,
-                "tipo": str(channel.type)
-            })
-        
-        # Método 1: Voice channels
-        for channel in guild.voice_channels:
-            members_in_channel = [
-                member.display_name
-                for member in guild.members
-                if member.voice and member.voice.channel and member.voice.channel.id == channel.id
-            ]
-            voice[channel.id] = members_in_channel
-            if members_in_channel:
-                print(f'  ✓ Voz "{channel.name}" ({channel.id}): {len(members_in_channel)} — {members_in_channel}', flush=True)
-            else:
-                print(f'  ○ Voz "{channel.name}" ({channel.id}): vacío', flush=True)
 
-        # Método 2: Stage channels
-        for channel in guild.stage_channels:
-            members_in_channel = [
-                member.display_name
-                for member in guild.members
-                if member.voice and member.voice.channel and member.voice.channel.id == channel.id
-            ]
-            voice[channel.id] = members_in_channel
-            if members_in_channel:
-                print(f'  ✓ Stage "{channel.name}" ({channel.id}): {len(members_in_channel)} — {members_in_channel}', flush=True)
-
-    cache_canales = canales
-    cache_voice = voice
-    total_users = sum(len(v) for v in voice.values())
-    print(f'✅ Cache OK: {len(canales)} canales, {len(voice)} con voz, {total_users} usuarios totales', flush=True)
-    print(f'Detalles de voz: {voice}', flush=True)
-
-async def refresh_voice_cache():
-    """Fuerza un chunk de todos los guilds para sincronizar miembros"""
-    print('>>> Iniciando refresh_voice_cache', flush=True)
-    for guild in client.guilds:
-        try:
-            print(f'  Chunkeando {guild.name}...', flush=True)
-            await guild.chunk(cache=True)
-            print(f'  ✓ Chunk OK: {guild.name}', flush=True)
-        except Exception as e:
-            print(f'  ✗ Chunk error {guild.name}: {e}', flush=True)
-    actualizar_cache()
-    print('>>> refresh_voice_cache completado', flush=True)
-
-@client.event
-async def on_ready():
-    global bot_ready
-    print(f'\n🤖 Bot conectado como {client.user}', flush=True)
-    print(f'>>> Chunkeando {len(client.guilds)} guilds...', flush=True)
-    
-    for guild in client.guilds:
-        print(f'Servidor: {guild.name} ({guild.id})', flush=True)
-        try:
-            await guild.chunk(cache=True)
-            print(f'✓ Chunk OK: {guild.name} — {guild.member_count} miembros', flush=True)
-        except Exception as e:
-            print(f'✗ Chunk error: {e}', flush=True)
-    
-    actualizar_cache()
-    bot_ready = True
-    print('✅ === BOT READY ===\n', flush=True)
-
-@client.event
-async def on_voice_state_update(member, before, after):
-    """Se dispara cuando alguien se conecta/desconecta de voz"""
-    print(f'🔊 Voice update: {member.name} — antes: {before.channel}, después: {after.channel}', flush=True)
-    actualizar_cache()
-
-@client.event
-async def on_member_update(before, after):
-    """Se dispara cuando cambia el nombre de un miembro"""
-    if before.display_name != after.display_name:
-        print(f'👤 Miembro actualizado: {before.display_name} → {after.display_name}', flush=True)
-        actualizar_cache()
-
+# ── BOT THREAD ────────────────────────────────────────────────────────────────
 def run_discord():
     global bot_loop
     try:
@@ -173,15 +145,9 @@ def run_discord():
             return
         bot_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(bot_loop)
-        print('🚀 Iniciando bot Discord...', flush=True)
         bot_loop.run_until_complete(client.start(token))
     except Exception as e:
         print(f'ERROR bot: {e}', flush=True)
 
-if __name__ == '__main__':
-    # Inicia bot en thread daemon
-    threading.Thread(target=run_discord, daemon=True).start()
-    
-    # Inicia Flask
-    print('🌐 Flask iniciado en http://localhost:5000', flush=True)
-    app.run(debug=False, host='0.0.0.0', port=5000)
+
+threading.Thread(target=run_discord, daemon=True).start()
