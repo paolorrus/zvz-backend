@@ -5,6 +5,7 @@ import asyncio
 import threading
 import os
 import time
+import copy
 
 app = Flask(__name__)
 CORS(app)
@@ -17,10 +18,12 @@ last_voice_event = None
 
 DISCORD_TOKEN = os.environ.get('DISCORD_TOKEN', '')
 
-voice_cache = {}
+# Thread-safe cache con lock
+_cache_lock = threading.Lock()
+_voice_cache = {}
 
 def rebuild_cache():
-    global voice_cache
+    global _voice_cache
     new_cache = {}
     for guild in client.guilds:
         for member in guild.members:
@@ -29,7 +32,14 @@ def rebuild_cache():
                 if cid not in new_cache:
                     new_cache[cid] = []
                 new_cache[cid].append(member.display_name)
-    voice_cache = new_cache
+    with _cache_lock:
+        _voice_cache = new_cache
+    total = sum(len(v) for v in new_cache.items())
+    print(f'[rebuild] {len(new_cache)} canales, {sum(len(v) for v in new_cache.values())} usuarios', flush=True)
+
+def get_cache():
+    with _cache_lock:
+        return copy.deepcopy(_voice_cache)
 
 
 @app.route('/voice/<channel_id>')
@@ -42,13 +52,15 @@ def get_voice_members(channel_id):
         if not bot_ready:
             return jsonify({"error": "Bot aún conectando"}), 503
 
-    members = voice_cache.get(cid, [])
-    print(f'[/voice/{cid}] → {members}', flush=True)
+    cache = get_cache()
+    members = cache.get(cid, [])
+    print(f'[/voice/{cid}] → {len(members)} miembros: {members}', flush=True)
     return jsonify({"members": members})
 
 
 @app.route('/debug')
 def debug():
+    cache = get_cache()
     guild_info = []
     for guild in client.guilds:
         vc_info = []
@@ -72,7 +84,7 @@ def debug():
         "bot_ready": bot_ready,
         "is_closed": client.is_closed(),
         "last_voice_event": last_voice_event,
-        "voice_cache": {str(k): v for k, v in voice_cache.items()},
+        "voice_cache": {str(k): v for k, v in cache.items()},
         "guilds": guild_info
     })
 
@@ -114,7 +126,6 @@ async def on_voice_state_update(member, before, after):
     last_voice_event = f'{member.display_name}: {b} → {a} @ {time.strftime("%H:%M:%S")}'
     print(f'[Voice] {last_voice_event}', flush=True)
     rebuild_cache()
-    print(f'[Voice] Cache: {voice_cache}', flush=True)
 
 
 def run_discord():
@@ -130,5 +141,4 @@ def run_discord():
         print(f'ERROR bot: {e}', flush=True)
 
 
-# daemon=False para que gunicorn no mate el thread del bot
 threading.Thread(target=run_discord, daemon=False).start()
