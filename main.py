@@ -15,6 +15,25 @@ bot_ready = False
 
 DISCORD_TOKEN = os.environ.get('DISCORD_TOKEN', '')
 
+# Cache manual: se actualiza en cada on_voice_state_update
+voice_cache = {}  # channel_id (int) -> [display_name, ...]
+
+def rebuild_cache():
+    global voice_cache
+    new_cache = {}
+    for guild in client.guilds:
+        # Iterar todos los miembros y ver en qué canal están
+        for member in guild.members:
+            if member.voice and member.voice.channel:
+                cid = member.voice.channel.id
+                if cid not in new_cache:
+                    new_cache[cid] = []
+                new_cache[cid].append(member.display_name)
+    voice_cache = new_cache
+    for cid, names in new_cache.items():
+        if names:
+            print(f'[cache] Canal {cid}: {names}', flush=True)
+
 
 @app.route('/voice/<channel_id>')
 def get_voice_members(channel_id):
@@ -29,21 +48,29 @@ def get_voice_members(channel_id):
         if not bot_ready:
             return jsonify({"error": "Bot aún conectando"}), 503
 
-    # Leer directo — sin chunk, sin async, sin cache
-    # discord.py mantiene vc.members actualizado via gateway events
-    for guild in client.guilds:
-        for vc in list(guild.voice_channels) + list(guild.stage_channels):
-            if vc.id == cid:
-                members = [m.display_name for m in vc.members]
-                print(f'[/voice] "{vc.name}": {members}', flush=True)
-                return jsonify({"members": members})
+    members = voice_cache.get(cid, None)
 
-    return jsonify({"error": "Canal no encontrado"}), 404
+    # Canal existe pero vacío = lista vacía, no error
+    if members is None:
+        # Puede ser que el canal exista pero esté vacío
+        # Verificar si el canal existe en el guild
+        found = False
+        for guild in client.guilds:
+            for vc in list(guild.voice_channels) + list(guild.stage_channels):
+                if vc.id == cid:
+                    found = True
+                    break
+        if found:
+            return jsonify({"members": []})
+        return jsonify({"error": "Canal no encontrado"}), 404
+
+    print(f'[/voice/{cid}] → {members}', flush=True)
+    return jsonify({"members": members})
 
 
 @app.route('/health')
 def health():
-    return jsonify({"status": "ok", "bot_ready": bot_ready})
+    return jsonify({"status": "ok", "bot_ready": bot_ready, "cached_channels": len(voice_cache)})
 
 
 @app.route('/canales')
@@ -62,11 +89,12 @@ async def on_ready():
     for guild in client.guilds:
         try:
             await guild.chunk(cache=True)
-            print(f'Chunk OK: {guild.name}', flush=True)
+            print(f'Chunk OK: {guild.name} — {guild.member_count} miembros', flush=True)
         except Exception as e:
             print(f'Chunk error: {e}', flush=True)
+    rebuild_cache()
     bot_ready = True
-    print('=== BOT READY ===', flush=True)
+    print(f'=== BOT READY — {len(voice_cache)} canales con gente ===', flush=True)
 
 
 @client.event
@@ -74,6 +102,9 @@ async def on_voice_state_update(member, before, after):
     b = getattr(before.channel, 'name', 'None')
     a = getattr(after.channel, 'name', 'None')
     print(f'[Voice] {member.display_name}: {b} → {a}', flush=True)
+    # Reconstruir cache completo desde guild.members (siempre fresco)
+    rebuild_cache()
+    print(f'[Voice] Cache actualizado: {voice_cache}', flush=True)
 
 
 def run_discord():
